@@ -1,0 +1,145 @@
+################################################################################
+# The Resilience Pilot - Prometheus Alerting Rules
+#
+# SRE Concepts Demonstrated:
+# - SLI/SLO: Service Level Indicators driving alerts
+# - Alert fatigue prevention: Only alert on actionable conditions
+# - Runbook links: Direct operators to remediation steps
+################################################################################
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: resilience-pilot-alerts
+  namespace: monitoring
+  labels:
+    app: resilience-pilot
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+    # ========================================================================
+    # Self-Healing Alerts
+    # These detect when Kubernetes self-healing is actively working
+    # ========================================================================
+    - name: resilience-pilot.self-healing
+      rules:
+        # Alert if pods are restarting frequently
+        # This indicates either application bugs or infrastructure issues
+        - alert: HighPodRestartRate
+          expr: |
+            increase(kube_pod_container_status_restarts_total{
+              pod=~"resilience-pilot.*"
+            }[5m]) > 3
+          for: 1m
+          labels:
+            severity: warning
+            team: sre
+          annotations:
+            summary: "High pod restart rate detected"
+            description: |
+              Pod {{ $labels.pod }} has restarted {{ $value }} times 
+              in the last 5 minutes. This may indicate application instability
+              or failed liveness probes.
+            runbook_url: "https://github.com/your-org/resilience-pilot/wiki/Runbook-HighPodRestarts"
+
+        # Alert if any pod is in CrashLoopBackOff
+        - alert: PodCrashLoopBackOff
+          expr: |
+            kube_pod_container_status_waiting_reason{
+              pod=~"resilience-pilot.*",
+              reason="CrashLoopBackOff"
+            } > 0
+          for: 2m
+          labels:
+            severity: critical
+            team: sre
+          annotations:
+            summary: "Pod is in CrashLoopBackOff"
+            description: |
+              Pod {{ $labels.pod }} is in CrashLoopBackOff state.
+              Self-healing is failing to recover the application.
+            runbook_url: "https://github.com/your-org/resilience-pilot/wiki/Runbook-CrashLoop"
+
+    # ========================================================================
+    # SLO-Based Alerts (Error Budget)
+    # Alerts based on Service Level Objectives
+    # ========================================================================
+    - name: resilience-pilot.slo
+      rules:
+        # High error rate alert (SLO: 99.5% success rate)
+        - alert: HighErrorRate
+          expr: |
+            (
+              sum(rate(http_requests_total{status=~"5.."}[5m])) 
+              / 
+              sum(rate(http_requests_total[5m]))
+            ) > 0.05
+          for: 2m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "High HTTP error rate"
+            description: |
+              Error rate is {{ $value | humanizePercentage }} over the last 5 minutes.
+              SLO target is < 0.5% error rate.
+            runbook_url: "https://github.com/your-org/resilience-pilot/wiki/Runbook-HighErrorRate"
+
+        # High latency alert (SLO: P95 < 500ms)
+        - alert: HighLatencyP95
+          expr: |
+            histogram_quantile(0.95, 
+              sum(rate(http_request_duration_seconds_bucket{endpoint="/health"}[5m])) by (le)
+            ) > 0.5
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+          annotations:
+            summary: "High request latency"
+            description: |
+              P95 latency for /health endpoint is {{ $value | humanizeDuration }}.
+              SLO target is P95 < 500ms.
+            runbook_url: "https://github.com/your-org/resilience-pilot/wiki/Runbook-HighLatency"
+
+    # ========================================================================
+    # Availability Alerts
+    # ========================================================================
+    - name: resilience-pilot.availability
+      rules:
+        # Alert if replicas are below desired count
+        - alert: InsufficientReplicas
+          expr: |
+            kube_deployment_status_replicas_available{
+              deployment="resilience-pilot"
+            } < kube_deployment_spec_replicas{
+              deployment="resilience-pilot"
+            }
+          for: 5m
+          labels:
+            severity: warning
+            team: sre
+          annotations:
+            summary: "Insufficient replicas available"
+            description: |
+              Deployment resilience-pilot has {{ $value }} available replicas 
+              but {{ $labels.spec_replicas }} are desired.
+
+        # Alert if no replicas are available
+        - alert: ServiceDown
+          expr: |
+            kube_deployment_status_replicas_available{
+              deployment="resilience-pilot"
+            } == 0
+          for: 1m
+          labels:
+            severity: critical
+            team: sre
+            page: "true"
+          annotations:
+            summary: "Service is completely down"
+            description: |
+              Deployment resilience-pilot has no available replicas.
+              Immediate action required!
+            runbook_url: "https://github.com/your-org/resilience-pilot/wiki/Runbook-ServiceDown"

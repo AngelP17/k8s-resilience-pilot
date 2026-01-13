@@ -1,0 +1,253 @@
+################################################################################
+# The Resilience Pilot - DevSecOps CI/CD Pipeline
+#
+# SRE & Security Concepts Demonstrated:
+# - Shift-left security: Scan code and images BEFORE deployment
+# - Security gates: Block releases with CRITICAL vulnerabilities
+# - GitOps: Automatic manifest updates trigger ArgoCD sync
+# - Immutable releases: Images tagged with commit SHA
+################################################################################
+
+name: DevSecOps Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  # Docker Hub image name (update with your namespace)
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/resilience-pilot
+  # Fallback for local testing
+  IMAGE_NAME_LOCAL: resilience-pilot
+
+jobs:
+  # ============================================================================
+  # JOB 1: Lint & Security Scan Python Code
+  # ============================================================================
+  lint-and-test:
+    name: 🔍 Lint & Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install bandit
+      
+      # ========================================================================
+      # BANDIT: Python Security Linter
+      # Finds common security issues in Python code:
+      # - Hardcoded passwords
+      # - SQL injection vulnerabilities
+      # - Insecure use of eval(), exec()
+      # - And more...
+      # ========================================================================
+      - name: Run Bandit security scan
+        run: |
+          echo "🔐 Running Bandit security analysis..."
+          bandit -r app/ -f json -o bandit-report.json || true
+          bandit -r app/ -ll -ii
+        continue-on-error: false
+      
+      - name: Upload Bandit report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bandit-security-report
+          path: bandit-report.json
+
+  # ============================================================================
+  # JOB 2: Build Docker Image
+  # ============================================================================
+  build:
+    name: 🏗️ Build Docker Image
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      # Generate image tags based on git context
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=
+            type=ref,event=branch
+            type=ref,event=pr
+      
+      # Build image (not pushing yet - scan first!)
+      - name: Build Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app
+          push: false
+          load: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      # Save image for next job
+      - name: Save Docker image
+        run: |
+          docker save ${{ env.IMAGE_NAME }}:${{ github.sha }} > image.tar
+      
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: image.tar
+          retention-days: 1
+
+  # ============================================================================
+  # JOB 3: Security Scan with Trivy
+  # ============================================================================
+  scan:
+    name: 🛡️ Vulnerability Scan
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+      
+      - name: Load Docker image
+        run: docker load < image.tar
+      
+      # ========================================================================
+      # TRIVY: Container Vulnerability Scanner
+      # Scans for:
+      # - OS package vulnerabilities (CVEs)
+      # - Application dependency vulnerabilities
+      # - Misconfigurations
+      # 
+      # Exit codes:
+      # - 0: No CRITICAL vulnerabilities found
+      # - 1: CRITICAL vulnerabilities found (blocks release)
+      # ========================================================================
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ env.IMAGE_NAME }}:${{ github.sha }}'
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL'
+      
+      # Generate detailed report even if scan passes
+      - name: Generate Trivy JSON report
+        uses: aquasecurity/trivy-action@master
+        if: always()
+        with:
+          image-ref: '${{ env.IMAGE_NAME }}:${{ github.sha }}'
+          format: 'json'
+          output: 'trivy-report.json'
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+      
+      - name: Upload Trivy report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trivy-security-report
+          path: trivy-report.json
+
+  # ============================================================================
+  # JOB 4: Tag & Push to Registry
+  # Only runs if scan passes - this is the security gate!
+  # ============================================================================
+  push:
+    name: 📦 Push to Registry
+    runs-on: ubuntu-latest
+    needs: scan
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: docker-image
+      
+      - name: Load Docker image
+        run: docker load < image.tar
+      
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      
+      # Tag with both SHA and 'latest'
+      - name: Tag and push image
+        run: |
+          docker tag ${{ env.IMAGE_NAME }}:${{ github.sha }} ${{ env.IMAGE_NAME }}:latest
+          docker push ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          docker push ${{ env.IMAGE_NAME }}:latest
+          echo "✅ Image pushed: ${{ env.IMAGE_NAME }}:${{ github.sha }}"
+
+  # ============================================================================
+  # JOB 5: GitOps - Update Kubernetes Manifests
+  # Updates deployment.yaml with new image tag, triggering ArgoCD sync
+  # ============================================================================
+  gitops-update:
+    name: 🔄 GitOps Update
+    runs-on: ubuntu-latest
+    needs: push
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      # ========================================================================
+      # Update the deployment manifest with new image tag
+      # This triggers ArgoCD to sync the new version automatically
+      # ========================================================================
+      - name: Update deployment manifest
+        run: |
+          NEW_IMAGE="${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          echo "📝 Updating deployment to: ${NEW_IMAGE}"
+          
+          # Use sed to update the image tag in deployment.yaml
+          sed -i "s|image: .*resilience-pilot:.*|image: ${NEW_IMAGE}|g" manifests/deployment.yaml
+          
+          # Show the change
+          grep "image:" manifests/deployment.yaml
+      
+      - name: Commit and push changes
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          
+          git add manifests/deployment.yaml
+          git diff --staged --quiet || git commit -m "🚀 Deploy: Update image to ${{ github.sha }}"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

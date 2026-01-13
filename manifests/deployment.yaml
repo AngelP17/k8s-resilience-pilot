@@ -1,0 +1,153 @@
+################################################################################
+# The Resilience Pilot - Kubernetes Deployment
+#
+# SRE Concepts Demonstrated:
+# - Self-healing: Liveness/Readiness probes trigger automatic recovery
+# - High availability: 3 replicas with anti-affinity spread across nodes
+# - Resource governance: CPU/memory limits prevent noisy neighbor issues
+# - Graceful shutdown: terminationGracePeriodSeconds allows in-flight requests
+################################################################################
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: resilience-pilot
+  labels:
+    app: resilience-pilot
+    version: v1
+spec:
+  # High Availability: 3 replicas ensures service survives pod failures
+  replicas: 3
+  
+  # Deployment strategy for zero-downtime updates
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1        # Allow 1 extra pod during update
+      maxUnavailable: 0  # Never go below desired count
+  
+  selector:
+    matchLabels:
+      app: resilience-pilot
+  
+  template:
+    metadata:
+      labels:
+        app: resilience-pilot
+        version: v1
+      annotations:
+        # Prometheus scraping annotations
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      # ========================================================================
+      # POD ANTI-AFFINITY
+      # Spreads pods across nodes for resilience against node failures
+      # ========================================================================
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - resilience-pilot
+                topologyKey: kubernetes.io/hostname
+      
+      # Security context at pod level
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      
+      containers:
+        - name: resilience-pilot
+          # Image tag is updated by GitOps workflow
+          # FORMAT: your-dockerhub-username/resilience-pilot:TAG
+          image: resilience-pilot:latest
+          imagePullPolicy: IfNotPresent
+          
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          
+          # ==================================================================
+          # LIVENESS PROBE
+          # Determines if the container is running. Failed = restart container.
+          # 
+          # Settings explained:
+          # - initialDelaySeconds: Wait for app to start before probing
+          # - periodSeconds: How often to probe
+          # - failureThreshold: Consecutive failures before restart
+          # ==================================================================
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+            successThreshold: 1
+          
+          # ==================================================================
+          # READINESS PROBE
+          # Determines if the container can receive traffic:
+          # - Failed = removed from Service endpoints (no traffic)
+          # - More sensitive than liveness (shorter delay, faster period)
+          # ==================================================================
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            timeoutSeconds: 2
+            failureThreshold: 3
+            successThreshold: 1
+          
+          # ==================================================================
+          # RESOURCE MANAGEMENT
+          # Prevents resource starvation and enables fair scheduling
+          # 
+          # Requests: Guaranteed resources for scheduling
+          # Limits: Maximum resources allowed (prevents runaway processes)
+          # ==================================================================
+          resources:
+            requests:
+              cpu: "50m"       # 5% of 1 CPU core
+              memory: "64Mi"  # 64 MiB RAM
+            limits:
+              cpu: "100m"      # 10% of 1 CPU core
+              memory: "128Mi"  # 128 MiB RAM
+          
+          # Container security context
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          
+          # Environment variables
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+      
+      # Graceful shutdown period (allow in-flight requests to complete)
+      terminationGracePeriodSeconds: 30
+      
+      # Restart policy (Always for Deployment)
+      restartPolicy: Always
