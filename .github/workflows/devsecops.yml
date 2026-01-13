@@ -79,6 +79,7 @@ jobs:
     outputs:
       image-tag: ${{ steps.meta.outputs.tags }}
       image-digest: ${{ steps.build.outputs.digest }}
+      effective-image-name: ${{ steps.set-image.outputs.image_name }}
     
     steps:
       - name: Checkout code
@@ -87,13 +88,24 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       
+      # Determine the image name (use local fallback if Docker Hub not configured)
+      - name: Set effective image name
+        id: set-image
+        run: |
+          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
+            echo "image_name=${{ secrets.DOCKERHUB_USERNAME }}/resilience-pilot" >> $GITHUB_OUTPUT
+          else
+            echo "image_name=resilience-pilot" >> $GITHUB_OUTPUT
+            echo "⚠️ DOCKERHUB_USERNAME not set, using local image name"
+          fi
+      
       # Generate image tags based on git context
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ env.IMAGE_NAME }}
+            ${{ steps.set-image.outputs.image_name }}
           tags: |
             type=sha,prefix=
             type=ref,event=branch
@@ -114,7 +126,7 @@ jobs:
       # Save image for next job
       - name: Save Docker image
         run: |
-          docker save ${{ env.IMAGE_NAME }}:${{ github.sha }} > image.tar
+          docker save ${{ steps.set-image.outputs.image_name }}:${{ github.sha }} > image.tar
       
       - name: Upload image artifact
         uses: actions/upload-artifact@v4
@@ -154,7 +166,7 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: '${{ env.IMAGE_NAME }}:${{ github.sha }}'
+          image-ref: '${{ needs.build.outputs.effective-image-name }}:${{ github.sha }}'
           format: 'table'
           exit-code: '1'
           ignore-unfixed: true
@@ -166,7 +178,7 @@ jobs:
         uses: aquasecurity/trivy-action@master
         if: always()
         with:
-          image-ref: '${{ env.IMAGE_NAME }}:${{ github.sha }}'
+          image-ref: '${{ needs.build.outputs.effective-image-name }}:${{ github.sha }}'
           format: 'json'
           output: 'trivy-report.json'
           vuln-type: 'os,library'
@@ -186,8 +198,9 @@ jobs:
   push:
     name: 📦 Push to Registry
     runs-on: ubuntu-latest
-    needs: scan
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build, scan]
+    # Only push if on main AND Docker Hub credentials are configured
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.DOCKERHUB_USERNAME != ''
     
     steps:
       - name: Download image artifact
@@ -207,10 +220,10 @@ jobs:
       # Tag with both SHA and 'latest'
       - name: Tag and push image
         run: |
-          docker tag ${{ env.IMAGE_NAME }}:${{ github.sha }} ${{ env.IMAGE_NAME }}:latest
-          docker push ${{ env.IMAGE_NAME }}:${{ github.sha }}
-          docker push ${{ env.IMAGE_NAME }}:latest
-          echo "✅ Image pushed: ${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          docker tag ${{ needs.build.outputs.effective-image-name }}:${{ github.sha }} ${{ needs.build.outputs.effective-image-name }}:latest
+          docker push ${{ needs.build.outputs.effective-image-name }}:${{ github.sha }}
+          docker push ${{ needs.build.outputs.effective-image-name }}:latest
+          echo "✅ Image pushed: ${{ needs.build.outputs.effective-image-name }}:${{ github.sha }}"
 
   # ============================================================================
   # JOB 5: GitOps - Update Kubernetes Manifests
@@ -219,8 +232,8 @@ jobs:
   gitops-update:
     name: 🔄 GitOps Update
     runs-on: ubuntu-latest
-    needs: push
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build, push]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.DOCKERHUB_USERNAME != ''
     
     steps:
       - name: Checkout code
@@ -234,7 +247,7 @@ jobs:
       # ========================================================================
       - name: Update deployment manifest
         run: |
-          NEW_IMAGE="${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          NEW_IMAGE="${{ needs.build.outputs.effective-image-name }}:${{ github.sha }}"
           echo "📝 Updating deployment to: ${NEW_IMAGE}"
           
           # Use sed to update the image tag in deployment.yaml
