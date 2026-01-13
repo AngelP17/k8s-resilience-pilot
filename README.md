@@ -304,6 +304,6 @@ MIT License - feel free to use this for your own portfolio!
 ---
 
 <p align="center">
-  Built with ❤️ for SRE interviews
+  Built with ❤️
 </p>
 # CI/CD trigger
