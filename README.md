@@ -1,1 +1,1 @@
-# ops-pilot-idp
+# k8s-resilience-pilot
