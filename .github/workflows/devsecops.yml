@@ -199,8 +199,8 @@ jobs:
     name: 📦 Push to Registry
     runs-on: ubuntu-latest
     needs: [build, scan]
-    # Only push if on main AND Docker Hub credentials are configured
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.DOCKERHUB_USERNAME != ''
+    # Only push if on main branch (requires Docker Hub secrets to be configured)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     
     steps:
       - name: Download image artifact
@@ -233,7 +233,8 @@ jobs:
     name: 🔄 GitOps Update
     runs-on: ubuntu-latest
     needs: [build, push]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.DOCKERHUB_USERNAME != ''
+    # Only update manifests if push was successful
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     
     steps:
       - name: Checkout code
