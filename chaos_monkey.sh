@@ -103,10 +103,11 @@ wait_for_recovery() {
         echo -ne "\r  ⏳ Running pods: ${current_count}/${expected_count} | Elapsed: ${elapsed}s   "
         
         if [[ "${current_count}" -ge "${expected_count}" ]]; then
-            # Verify all pods are actually ready
-            local all_ready=$(kubectl get pods -n ${NAMESPACE} -l app=${DEPLOYMENT_NAME} \
-                -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}' | \
-                grep -c "True" || echo "0")
+            # Verify all pods are actually ready by counting "True" values
+            # The jsonpath returns space-separated values like "True True True"
+            local ready_statuses=$(kubectl get pods -n ${NAMESPACE} -l app=${DEPLOYMENT_NAME} \
+                -o jsonpath='{.items[*].status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)
+            local all_ready=$(echo "${ready_statuses}" | tr ' ' '\n' | grep -c "True" 2>/dev/null || echo "0")
             
             if [[ "${all_ready}" -ge "${expected_count}" ]]; then
                 echo ""  # Newline after the progress
