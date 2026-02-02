@@ -12,6 +12,34 @@ Complete guide to using your SRE and chaos engineering lab.
 
 ---
 
+## 🔄 Workflow Overview
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Grafana
+    participant LoadGen as Load Generator
+    participant Chaos as Chaos Monkey
+    participant K8s as Kubernetes
+    participant Pods
+
+    User->>Grafana: Open dashboard
+    User->>LoadGen: Start generate-load.sh
+    LoadGen->>Pods: Continuous HTTP requests
+    Pods-->>Grafana: Metrics via Prometheus
+    
+    User->>Chaos: Run demo-chaos.sh
+    Chaos->>K8s: Delete random pod
+    K8s-->>Pods: Pod terminated
+    Grafana-->>User: Shows pod count drop
+    K8s->>Pods: Create new pod (self-heal)
+    Grafana-->>User: Shows recovery
+    
+    Note over User,Pods: MTTR target: < 30 seconds
+```
+
+---
+
 ## 🚀 Quick Start
 
 ### Start Port Forwards

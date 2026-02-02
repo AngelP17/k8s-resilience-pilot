@@ -37,7 +37,32 @@ kubectl get nodes
 
 ## Architecture
 
-After deployment, run `terraform output architecture_diagram` to get a Mermaid.js diagram.
+```mermaid
+graph TB
+    subgraph "k3d Cluster"
+        subgraph "Control Plane"
+            S[Server Node<br/>k3d-resilience-pilot-server-0]
+        end
+        
+        subgraph "Worker Nodes"
+            A1[Agent Node 1<br/>k3d-resilience-pilot-agent-0]
+            A2[Agent Node 2<br/>k3d-resilience-pilot-agent-1]
+        end
+        
+        S --> A1
+        S --> A2
+    end
+    
+    LB[LoadBalancer<br/>:8080 → :80] --> S
+    
+    style S fill:#fff3e0
+    style A1 fill:#e8f5e9
+    style A2 fill:#e8f5e9
+    style LB fill:#e1f5fe
+```
+
+> [!TIP]
+> Run `terraform output architecture_diagram` after deployment for a dynamic version.
 
 ## Cleanup
 
