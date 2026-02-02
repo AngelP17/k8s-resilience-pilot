@@ -69,7 +69,7 @@ spec:
         - name: resilience-pilot
           # Image tag is updated by GitOps workflow
           # FORMAT: your-dockerhub-username/resilience-pilot:TAG
-          image: angellpt/resilience-pilot:9aec01e657d295d7dcf2b318df31fa8a216d0e1f
+          image: angellpt/resilience-pilot:ea8030d6bdb1655657ebeb676d592f58fba4b4c1
           imagePullPolicy: IfNotPresent
           
           ports:
