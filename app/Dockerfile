@@ -33,6 +33,10 @@ RUN pip install --no-cache-dir --user -r requirements.txt
 # =============================================================================
 FROM python:3.11-slim as runtime
 
+# Security: Apply latest OS security patches (fixes CVE-2025-15467 in OpenSSL)
+RUN apt-get update && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
 # Security: Run as non-root user
 # This follows the principle of least privilege
 RUN groupadd --gid 1000 appgroup && \
